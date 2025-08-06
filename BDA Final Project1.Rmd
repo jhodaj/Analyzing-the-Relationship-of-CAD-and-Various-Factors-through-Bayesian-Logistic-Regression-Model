@@ -1,0 +1,1174 @@
+---
+title: "Bayesian Data Analysis Final Project"
+subtitle: "Analyzing the Relationship of Coronary Artery Disease and Various Factors through Bayesian Logistic Regression Model"
+author: "Jezerca Hodaj"
+date: "`r Sys.Date()`"
+output: pdf_document
+includes:
+after_body: appendix.md
+bibliography: references.bib
+link-citations: true 
+number_sections: TRUE
+header-includes: 
+- \usepackage{etoolbox}
+- \usepackage{amsmath,amssymb}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(knitr)
+library(LearnBayes)
+library(DescTools)
+library(latex2exp )
+library(ggplot2)
+library(cowplot)
+library(car)
+library(caret)
+library(MCMCpack)
+library(coda)
+```
+
+
+# 1. Introduction 
+
+Coronary artery disease (CAD) is a complex multifactorial condition influenced by various demographic, clinical, and lifestyle factors. Understanding the relationship between CAD and its predictors is crucial for accurate risk assessment and personalized intervention strategies. Bayesian logistic regression models offer a powerful framework for analyzing these relationships while accounting for uncertainty and incorporating prior knowledge. This project aims to investigate the association between CAD and multiple predictors using a Bayesian logistic regression model. 
+
+The dataset that we chose contains 13 variable [@kaggle], but for the purpose of this project we will only use the following 6 variables: 
+
+\begin{itemize}
+\item age (Age of the patient in years)
+\item sex (Male/Female)
+\item cp chest pain type ([typical angina, atypical angina, non-anginal, asymptomatic])
+\item trestbps resting blood pressure (resting blood pressure (in mm Hg on admission to the hospital))
+\item chol (serum cholesterol in mg/dl)
+\item thalch: maximum heart rate achieved
+\end{itemize}
+
+The first issue that we had to deal with was the handling of the missing values. 
+One of the goals that we had was to compare the frequentist and the bayesian approach for our problem. Both these approaches are developed in the next sections. For the Bayesian approach we wanted to see how the models would differ when dealing with non-informative and informative prior distributions for the model parameters. Moreover we will employ Bayesian inference techniques, such as Markov Chain Monte Carlo (MCMC) sampling to derive posterior distributions of model parameters. 
+
+
+
+# 2. Data Imputing and Transforming
+
+The variables that we are including in our project had missing values. More specifically, the variable Resting Blood Pressure had $60$ missing values, Serum Cholesterol had $200$ missing values and Maximum Heart Rate Achieved had $55$ missing values. Since all these variables are of a continuous nature, we decided to replace the missing values with the mean conditioned on the sex variable and the group age. 
+The group ages that the mean was calculated for are: 
+
+\begin{itemize}
+\item 20 - 29,  30 - 39,  40 - 49
+\item 50 - 59,  60 - 69, 70 - 79, > 80
+\end{itemize}
+
+
+\vspace{0.5cm}
+
+
+
+```{r,message=FALSE, warning= FALSE, echo=FALSE}
+
+
+data <- read.csv("heart_disease_uci.csv")
+
+# Define the age groups
+age_groups <- c("20-29", "30-39", "40-49","50-59","60-69","70-79", "80+")
+
+# Split age into groups
+data <- data %>%
+  mutate(age_group = cut(age, breaks = c(20, 29, 39, 49, 59, 69, 79, Inf), 
+                         labels = age_groups))
+
+# Calculate mean values for each age group, sex, and variable
+mean_values <- data %>%
+  group_by(age_group, sex) %>%
+  summarise(mean_trestbps = mean(trestbps, na.rm = TRUE),
+                mean_chol = mean(chol, na.rm = TRUE),
+              mean_thalch = mean(thalch, na.rm = TRUE))
+
+# Merge mean_values back into data
+data <- data %>%
+  left_join(mean_values, by = c("age_group", "sex"))
+
+# Replace missing and zero values with respective mean
+data <- data %>%
+  mutate(trestbps = ifelse(is.na(trestbps) | trestbps == 0, mean_trestbps, 
+                           trestbps),
+        chol = ifelse(is.na(chol) | chol == 0, mean_chol, chol),
+         thalch = ifelse(is.na(thalch) | thalch == 0, mean_thalch, thalch))
+
+# Remove mean values columns
+data <- data %>%dplyr::select(-dplyr::starts_with("mean_"))
+
+#data <- data %>% select(-starts_with("mean_"))
+
+# Remove age_group column if no longer needed
+data <- data %>% dplyr::select(-age_group)
+
+write.csv(data, "heart_disease_complete.csv", row.names = FALSE) 
+
+```
+
+
+\vspace{0.5cm}
+
+
+The dependent variable in the dataset is denoted by "num". It takes the values $0,1,2,3,4$, which we interpreted as "0 = no heart disease" and "1,2,3,4 = heart disease". Following this reasoning we converted the predicted variable into a binary one, " 0 = no heart disease" and "1 = heart disease". In our dataset we substituted the values "1, 2, 3, 4 = 1" and "0 = 0".  
+
+
+
+\vspace {0.5cm}
+
+```{r echo=FALSE, warning=FALSE}
+
+data_num <- read.csv("heart_disease_complete.csv")
+  
+
+data_num$y <- ifelse(data_num$num == 0, 0, 1)
+
+
+write.csv(data_num, "heart_disease_num.csv", row.names = FALSE) 
+
+
+
+data_y <- read.csv("heart_disease_num.csv")
+
+
+#Selecting only the 6 variables of interest from the dataset and the response y
+
+datacrop <- data_y[, c("age", "sex", "cp", "trestbps","chol","thalch","y")]
+
+# Save the subsetted dataset as a new dataset
+#write.csv(datacrop, "heart_disease_crop.csv", row.names = FALSE) 
+
+head(datacrop, n=3)
+```
+
+\vspace{0.5cm}
+
+
+Moreover, the variables sex and chest pain types, were non-numeric categorical variables, so we transformed the sex variable into a binary variable and the chest pain types variable into a numeric variable. The transformation happened as below: 
+
+\begin{itemize}
+\item Male = 1   \hspace{2 cm}     asymptomatic = 0
+\item Female = 0 \hspace{1.5 cm}  atypical angina = 1
+\item \hspace {3.9 cm}              non-anginal = 2
+\item \hspace {3.5 cm}           typical angina = 3
+\end{itemize} 
+
+
+\vspace{0.5cm}
+
+
+The final look of our dataset: 
+
+\vspace{0.3cm}
+
+```{r,message=FALSE, warning= FALSE, echo=FALSE}
+datafactor <- read.csv("heart_disease_crop.csv")
+
+# Define a list specifying the number of levels for each categorical variable
+levels_list <- list(
+  sex = 2,       # 0, 1
+   cp = 4        # 0, 1, 2, 3
+)
+
+
+# Loop through each categorical variable
+for (var in names(levels_list)) {
+  # Convert variable to factor
+  datafactor[[var]] <- as.factor(datafactor[[var]])
+  
+  # Perform integer encoding based on the specified number of levels
+  levels_count <- levels_list[[var]]
+  if (levels_count > 1) {
+    datafactor[[var]] <- as.integer(datafactor[[var]]) - 1
+  } else {
+    datafactor[[var]] <- as.integer(datafactor[[var]])  
+  }
+}
+
+head(datafactor, n = 3)
+#tail(datafactor, n=3)
+
+#write.csv(datafactor, file = "heart_disease_final.csv", row.names = FALSE)
+
+```
+
+\vspace{0.3cm}
+
+
+Another objective of this project is to use our model for predicting the outcome of a patient given a set of attributes. In order to do this, we are going to split our dataset in two parts, the training dataset and the testing dataset. We are going to use $80\%$ of our data for the training mission and $20\%$ of our data for testing. 
+
+
+\vspace{0.3cm}
+
+```{r,message=FALSE, warning= FALSE, echo=FALSE}
+
+data_split <- read.csv("heart_disease_final.csv")
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Determine the number of rows in the original dataset
+total_rows <- nrow(data_split)
+
+# Determine the number of rows to include in the training set 
+# (e.g., 80% of the original dataset)
+train_rows <- floor(0.8 * total_rows)
+
+test_rows <- 920 - train_rows
+
+# Select row indices for the training set
+train_indices <- sample(1:total_rows, train_rows, replace = FALSE)
+
+# Create the training set
+train_data <- data_split[train_indices, ]
+
+# Create the test set by excluding the rows included in the training set
+test_data <- data_split[-train_indices, ]
+
+print("Training Data size")
+print(train_rows)
+head(train_data, n = 2)
+print("Testing Data size")
+print(test_rows)
+head(test_data, n = 2)
+
+#write.csv(train_data, file = "heart_disease_train.csv", row.names = FALSE)
+#write.csv(test_data, file = "heart_disease_test.csv", row.names = FALSE)
+
+```
+
+\vspace{0.5cm}
+
+
+# 3. Data Visualization
+
+As we saw earlier, 4 of the variables that we are going to use in our models are continuous and the other 2 are discrete variables. We assume that \texttt{age, resting blood pressure, cholesterol, maximum heart rate achieved} are normally distributed, \texttt{sex} is a Bernoulli random variable and \texttt{chest pain type} is a binomial random variable. 
+
+
+
+Plotting the data confirms our assumptions that the 4 continuous variables follow a normal distribution. 
+
+\vspace{0.5cm}
+```{r,message=FALSE, warning= FALSE, echo=FALSE}
+
+data <- read.csv("heart_disease_final.csv")
+
+mu.age <- mean(data$age)
+
+sig2.age <- var(data$age)
+s2.age <- sqrt(sig2.age)
+
+## generate 1000 random numbers from a normal distribution with mean=mu and 
+# std = sigma
+
+df.age <- as.data.frame(rnorm(n=1000, mean  = mu.age, sd=s2.age)) 
+
+
+mu.trestbps <- mean(data$trestbps)
+
+sig2.trestbps <- var(data$trestbps)
+s2.trestbps <- sqrt(sig2.trestbps)
+
+## generate 1000 random numbers from a normal distribution with mean=mu and 
+# std = sigma
+
+df.trestbps <- as.data.frame(rnorm(n=1000, mean  = mu.trestbps, sd=s2.trestbps)) 
+
+
+mu.chol <- mean(data$chol)
+
+sig2.chol <- var(data$chol)
+s2.chol <- sqrt(sig2.chol)
+
+## generate 1000 random numbers from a normal distribution with mean=mu and 
+# std = sigma
+
+df.chol <- as.data.frame(rnorm(n=1000, mean  = mu.chol, sd=s2.chol)) 
+
+
+
+mu.thalch <- mean(data$thalch)
+
+sig2.thalch <- var(data$thalch)
+s2.thalch <- sqrt(sig2.thalch)
+
+## generate 1000 random numbers from a normal distribution with mean=mu and 
+# std = sigma
+
+df.thalch <- as.data.frame(rnorm(n=1000, mean  = mu.thalch, sd=s2.thalch)) 
+
+
+
+plot1 <- ggplot(df.age, aes(x = df.age[,1])) +
+  geom_histogram(binwidth = 5, fill = "lightblue", color = "black", 
+                 aes(y=..density..)) +
+  stat_function(fun = dnorm, args = list(mean = mu.age, sd = s2.age), 
+                color = "red", size = 1) +
+  labs(title = "",
+       x = "Age",
+       y = "Density") +
+  theme_minimal()
+
+plot2 <- ggplot(df.trestbps, aes(x = df.trestbps[,1])) +
+  geom_histogram(binwidth = 5, fill = "lightblue", color = "black", 
+                 aes(y=..density..)) +
+  stat_function(fun = dnorm, args = list(mean = mu.trestbps, sd = s2.trestbps), 
+                color = "red", size = 1) +
+  labs(title = "",
+       x = "Resting Blood Pressure",
+       y = "Density") +
+  theme_minimal()
+
+
+plot3 <- ggplot(df.chol, aes(x = df.chol[,1])) +
+  geom_histogram(binwidth = 5, fill = "lightblue", color = "black", 
+                 aes(y=..density..)) +
+  stat_function(fun = dnorm, args = list(mean = mu.chol, sd = s2.chol), 
+                color = "red", size = 1) +
+  labs(title = "",
+       x = "Cholesterol",
+       y = "Density") +
+  theme_minimal()
+
+plot4 <- ggplot(df.thalch, aes(x = df.thalch[,1])) +
+  geom_histogram(binwidth = 5, fill = "lightblue", color = "black",
+                 aes(y=..density..)) +
+  stat_function(fun = dnorm, args = list(mean = mu.thalch, sd = s2.thalch), 
+                color = "red", size = 1) +
+  labs(title = "",
+       x = "Max Heart Rate",
+       y = "Density") +
+  theme_minimal()
+
+
+plot_grid(plot1, plot2, plot3, plot4, ncol = 2)
+
+
+```
+
+\vspace{0.5cm}
+
+
+
+The two other variables; \texttt{chest pain types} and \texttt{sex}. Below we have their barplots. Most of the patients in the dataset are males and most patients are asymptotic of chest pain. 
+
+\vspace{0.5cm}
+```{r,message=FALSE, warning= FALSE, echo=FALSE}
+## plot the categorical variables variable 
+
+# Sample data representing categories
+datacp <- data$cp
+
+# Calculate frequencies
+frequency_cp <- table(datacp)
+
+datas <- data$sex
+
+# Calculate frequencies
+frequency_s <- table(datas)
+
+par(mfrow = c(1,2))
+# Plot the frequencies
+barplot(frequency_cp, xlim = c(0,5), ylim=c(0, 500), 
+        xlab = "Asymp  At-Ang  Non-Ang  Typ-Ang", ylab = "Frequencies", 
+        main = "Chest Pain Types")
+
+# Plot the frequencies
+barplot(frequency_s, xlim = c(0,3), ylim=c(0, 800), 
+        xlab = "Female      Male", ylab = "Frequencies", 
+        main = "Sex")
+
+
+```
+
+
+\vspace{0.5cm}
+
+In order to use logistic regression we need to check for multicollinearity among our variables. We need to verify the assumption of weak or nonexistent multicollinearity. For this we fit a generalized linear model to our variables and compute the Variance Inflation Factor (VIF). 
+
+\vspace{0.5cm}
+
+```{r echo=FALSE, warning=FALSE}
+
+model <- glm(y ~ age + sex + cp + trestbps + chol + thalch, data = data, 
+             family = binomial)
+
+# Calculate VIF
+vif_values <- vif(model)
+
+# Print VIF values
+print(vif_values)
+
+```
+
+\vspace{0.3cm}
+
+As we can see the VIF is very close to 1 for each of the variables that we want to include in our model. Thus the assumption of no multicolinearity among predictor for the logistic regression is satisfied. 
+
+
+# 4. Logistic Regression 
+
+We start our analysis by implementing the frequentist approach. We are going to model the relation of our binary response variable, CAD, and the 6 predictors using a logistic regression. In this framework, we assume that our model parameters are fixed unknown quantities and that our response variable follows a Bernoulli distribution with probability of success $p_i$, here success means that the CAD is present in the patient, i.e. $y_i=1$. 
+
+
+\begin{align*}
+Y_{i}|p_{i} & \sim \text{Bernoulli}(p_{i})
+\end{align*}
+
+
+
+The model: 
+
+\begin{align*}
+\log\left(\frac{p_i}{1-p_i}\right) & = \text{logit}(p_i) \\
+& = \alpha + \beta_{\text{age}} \cdot \text{age}_{i} + \beta_{\text{sex}} \cdot \text{sex}_{i} + \beta_{\text{cp}} \cdot \text{cp}_{i} + \beta_{\text{trestbps}} \cdot \text{trestbps}_{i} + \beta_{\text{chol}} \cdot \text{chol}_{i} + \beta_{\text{thalch}} \cdot \text{thalch}_{i}
+\end{align*}
+
+From here, solving for the predictor parameter $p_i$ we get that: [@bayes]
+
+\[
+p_i = \frac{\exp[(\beta_0 + \beta_{\text{age}} \cdot \text{age}_{i} + \beta_{\text{sex}} \cdot \text{sex}_{i} + \beta_{\text{cp}} \cdot \text{cp}_{i} + \beta_{\text{trestbps}} \cdot \text{trestbps}_{i} + \beta_{\text{chol}} \cdot \text{chol}_{i} + \beta_{\text{thalch}} \cdot \text{thalc}_{i})]}{1 + \exp[(\beta_0 + \beta_{\text{age}} \cdot \text{age}_{i} + \beta_{\text{sex}} \cdot \text{sex}_{i} + \beta_{\text{cp}} \cdot \text{cp}_{i} + \beta_{\text{trestbps}} \cdot \text{trestbps}_{i} + \beta_{\text{chol}} \cdot \text{chol}_{i} + \beta_{\text{thalch}} \cdot \text{thalc}_{i})]}
+\]
+
+
+\[
+p_i = \frac{\exp(x_{i}\beta)}{1+\exp(x_{i}\beta)}
+\]
+
+where $x_i$ is the data vector for the ith individual. Then $Y_i \sim \text{Bernoulli}(\frac{\exp(x_{i}\beta)}{1+\exp(x_{i}\beta})$. 
+
+
+\vspace{0.5cm}
+
+```{r,message=FALSE, warning= FALSE, echo=FALSE}
+
+train_data <- read.csv("heart_disease_train.csv")
+
+# Extract response variable y from the last column
+y <- train_data[, ncol(train_data)]
+
+# Extract predictor variables X from all columns except the last
+X <- train_data[, -ncol(train_data)]
+
+X <- as.matrix(X)
+
+# Add intercept term to predictor variables
+X <- cbind(1, X)
+
+# Fit logistic regression model
+fit_freq <- glm(y ~ X - 1,  family = binomial(link = probit))
+
+# Display summary of the model
+summary(fit_freq)
+
+
+```
+
+\vspace{0.3cm}
+
+The model output gives the parameter estimates for each coefficient $\beta_i$ and their significance in the model. Out of 6 variables 4 of them seem to be significant, namely \texttt{age, sex, chest pain type, maximum heart rate achieved}. 
+
+
+
+# 5. Bayesian Logistic Regression 
+
+When employing the Bayesian approach for the logistic regression, we are going to consider two cases, non-informative prior distribution and informative prior distribution of the model parameters. [@bda3] 
+
+Once more, we have that the response variable $y$ follows a Bernoulli distribution: 
+
+$Y_i \sim \text{Bernoulli}(\frac{\exp(x_{i}\beta)}{1+\exp(x_{i}\beta)})$.  
+
+The posterior distribution of the model parameters is given by: 
+
+
+\begin{align*}
+p(\beta|Y,X) & \propto p(\beta)\cdot p(Y|X, \beta)  \\
+\\
+& = N_7(\beta^{0}, \Sigma) \cdot \prod_{i=1}^{n} \Bigg[\frac{\exp(x_{i}\beta)}{1+\exp(x_{i}\beta)}\Bigg]^{y_i} \cdot \Bigg[1 - \frac{\exp(x_{i}\beta)}{1+\exp(x_{i}\beta)}\Bigg]^{1 - y_i} 
+\end{align*}
+
+
+$\beta^{0}$ and $\Sigma$ are specified for each of the two scenarios described in the next sections. 
+
+## 5.1 Bayesian Logistic Regression with a non-informative prior 
+
+First we take a look at the non-informative case. We will assume that the $\beta_{i} \sim N(0, 1000)$, for $i = 0,1,\cdots,6$. We're choosing here a large variance for each parameter, which means they will have a very flat prior distribution. Moreover, we assume that the parameters are independent in this case, by choosing the variance covariance matrix to be $V_0 = 1000I_7$. 
+
+For the non-informative prior case we would have the following posterior distribution
+
+
+\begin{align*}
+p(\beta|Y,X) & \propto p(\beta)\cdot p(Y|X, \beta)  \\
+\\
+& = N_7(\textbf{0}, 1000I_7) \Bigg[\frac{\exp(x_{i}\beta)}{1+\exp(x_{i}\beta)}\Bigg]^{\sum_{i=1}^{n}y_i} \Bigg[\frac{1}{1+\exp(x_{i}\beta)}\Bigg]^{n - \sum_{i=1}^{n}y_i}
+\end{align*}
+
+
+Running the logistic regression model in \texttt{R} we get the following posterior intervals for the $\beta_i$ and their posterior densities. 
+
+\vspace{0.5cm}
+
+```{r,message=FALSE, warning= FALSE, echo=FALSE}
+train_data <- read.csv("heart_disease_train.csv")
+
+# Extract response variable y from the last column
+y <- train_data[, ncol(train_data)]
+
+# Extract predictor variables X from all columns except the last
+X <- train_data[, -ncol(train_data)]
+
+X <- as.matrix(X)
+
+# Add intercept term to predictor variables
+X <- cbind(1, X)
+
+beta0 <- c(0,0,0,0,0,0,0)
+n<-7
+P0 <- 0.001*diag(n)
+
+prior=list(beta=beta0,P=P0)
+m=10000
+fit_bayes=bayes.probit(y,X,m, prior)
+
+par(mfrow=c(3,3))
+hist(fit_bayes$beta[,1],main="Intercept", xlab=expression(beta[1]))
+hist(fit_bayes$beta[,2],main="Age", xlab=expression(beta[2]))
+hist(fit_bayes$beta[,3],main="Sex", xlab=expression(beta[3]))
+hist(fit_bayes$beta[,4],main="Chest Pain Type", xlab=expression(beta[4]))
+hist(fit_bayes$beta[,5],main="Resting Blood Pressure", xlab=expression(beta[5]))
+hist(fit_bayes$beta[,6],main="Cholesterol", xlab=expression(beta[6]))
+hist(fit_bayes$beta[,7],main="Max Heart Rate", xlab=expression(beta[7]))
+
+
+#apply(fit_bayes$beta,2,quantile,c(.05,.5,.95))
+
+col_names <- c(TeX("$\\beta_{0}$"), TeX("$\\beta_{1}$"), TeX("$\\beta_{2}$"),
+               TeX("$\\beta_{3}$"),TeX("$\\beta_{4}$"), TeX("$\\beta_{5}$"),
+               TeX("$\\beta_{6}$"))
+conf.int <-kable(apply(fit_bayes$beta,2,quantile,c(.025,.25,.5,.75,.975)), 
+                 col.names = col_names)
+print(conf.int)
+
+```
+
+
+
+
+
+
+
+\vspace{0.5cm}
+
+
+If we compare these results with the frequentists logistic regression model, we see that both approaches give the same significant predictors, which are \texttt{age, sex, chest pain type, maximum heart rate achieved}. The other two predictors, \texttt{resting blood pressure, cholesterol} seem to be non-significant in predicting the response, i.e. coronary artery disease.  
+
+
+Here we take a look at the probability of having CAD based on the age of the patient for males and females, while keeping the other variables constant. We will use the mean of resting blood pressure and cholesterol and the mode for chest pain type, since this is a categorical variable.
+
+
+The two graphs below represent the probability of CAD for males and females based on age. We can see that there is a higher probability of having CAD for male patients than female patients at a given age. Cardiovascular disease develops 7 to 10 years later in women than in men, but it is more lethal in women than in men, according to the Netherlands Heart Journal [@maas] 
+
+\vspace{0.3cm}
+
+```{r,message=FALSE, warning= FALSE, echo=FALSE}
+
+
+# Compute the mode of cp 
+mode_cp <- Mode(train_data$cp)
+
+# Compute the means for male and female of the other variables
+mean_trestbps<- mean(train_data$trestbps)
+
+mean_chol<- mean(train_data$chol)
+
+mean_thalch<- mean(train_data$thalch)
+
+
+
+a=seq(min(train_data$age),max(train_data$age))
+Xm=cbind(1,a,1, mode_cp, mean_trestbps, mean_chol,mean_thalch)
+p.m=bprobit.probs(Xm,fit_bayes$beta)
+Xf=cbind(1,a,0,mode_cp, mean_trestbps, mean_chol,mean_thalch)
+p.f=bprobit.probs(Xf,fit_bayes$beta)
+
+par(mfrow=c(1,2))
+plot(a,apply(p.m,2,quantile,.5),type="l",ylim=c(0,1),
+     xlab="Age",ylab="Probability of CAD (males)")
+lines(a,apply(p.m,2,quantile,.05),lty=2)
+lines(a,apply(p.m,2,quantile,.95),lty=2)
+plot(a,apply(p.f,2,quantile,.5),type="l",ylim=c(0,1),
+     xlab="Age",ylab="Probability of CAD (females)")
+lines(a,apply(p.f,2,quantile,.05),lty=2)
+lines(a,apply(p.f,2,quantile,.95),lty=2)
+
+```
+
+\vspace{0.5cm}
+
+
+These graphs on the other hand represent the probability of CAD for males and females based on the maximum heart rate achieved. The two graphs appear to be similar. It seems that for the same maximum heart rate, women have a lower probability of having CAD.
+
+\vspace{0.3cm}
+
+```{r,message=FALSE, warning= FALSE, echo=FALSE}
+
+b=seq(min(train_data$thalch),max(train_data$thalch))
+
+mean_age <- mean(train_data$age)
+
+Xm=cbind(1,mean_age,1, mode_cp, mean_trestbps, mean_chol,b)
+p.m=bprobit.probs(Xm,fit_bayes$beta)
+Xf=cbind(1,mean_age,0,mode_cp, mean_trestbps, mean_chol,b)
+p.f=bprobit.probs(Xf,fit_bayes$beta)
+
+par(mfrow=c(1,2))
+plot(b,apply(p.m,2,quantile,.5),type="l",ylim=c(0,1),
+     xlab="Max Heart Rate",ylab="Probability of CAD (males)")
+lines(b,apply(p.m,2,quantile,.05),lty=2)
+lines(b,apply(p.m,2,quantile,.95),lty=2)
+plot(b,apply(p.f,2,quantile,.5),type="l",ylim=c(0,1),
+     xlab="Max Heart Rate",ylab="Probability of CAD (females)")
+lines(b,apply(p.f,2,quantile,.05),lty=2)
+lines(b,apply(p.f,2,quantile,.95),lty=2)
+
+
+```
+
+\vspace{1cm}
+
+
+
+
+
+## 5.2 Bayesian Logistic Regression with an informative prior 
+
+For this scenario we are going to use Zellner's prior, where $\beta^{0} = \textbf{0}$ and $V_{0} = c(X'X)^{-1}$. In the \texttt{bayes.probit} function instead of the variance-covariance matrix, we input the prior precision matrix $P_0 = V_{0}^{-1} = \frac{X'X}{c}$. Here we choose $c = 10$. 
+
+
+For the informative prior case we would have the following posterior distribution
+
+
+\begin{align*}
+p(\beta|Y,X) & \propto p(\beta)\cdot p(Y|X, \beta)  \\
+\\
+& = N_7(\textbf{0}, 10(X^{'}X)^{-1}) \Bigg[\frac{\exp(x_{i}\beta)}{1+\exp(x_{i}\beta)}\Bigg]^{\sum_{i=1}^{n}y_i} \Bigg[\frac{1}{1+\exp(x_{i}\beta)}\Bigg]^{n - \sum_{i=1}^{n}y_i}
+\end{align*}
+
+
+We fit our regression model using again \texttt{bayes.probit} function, specifying the prior distribution of the parameter vector $\beta$. Below we have the histograms of the posterior distribution for each $\beta_i$. We also have their $95\%$ posterior intervals. We notice that these intervals in the case of informative prior distribution are more narrow. This is because the informative prior plays a bigger role now in the posterior distribution of the $\beta_{i}s$. 
+
+\vspace{0.3cm}
+
+```{r,message=FALSE, warning= FALSE, echo=FALSE}
+
+
+train_data <- read.csv("heart_disease_train.csv")
+
+# Extract response variable y from the last column
+y <- train_data[, ncol(train_data)]
+
+# Extract predictor variables X from all columns except the last
+X <- train_data[, -ncol(train_data)]
+
+X <- as.matrix(X)
+
+# Add intercept term to predictor variables
+X <- cbind(1, X)
+
+beta0 <- c(0,0,0,0,0,0,0)
+c0 <- 10
+P0 <- t(X)%*%X/c0
+
+prior=list(beta=beta0,P=P0)
+m=10000
+fit_bayes_info=bayes.probit(y,X,m, prior)
+
+par(mfrow=c(3,3))
+#hist(fit_bayes_info$beta[,1],main="Intercept", xlab=expression(beta[1]))
+hist(fit_bayes_info$beta[,2],main="Age", xlab=expression(beta[2]))
+hist(fit_bayes_info$beta[,3],main="Sex", xlab=expression(beta[3]))
+hist(fit_bayes_info$beta[,4],main="Chest Pain Type", xlab=expression(beta[4]))
+hist(fit_bayes_info$beta[,5],main="Resting Blood Pressure",
+     xlab=expression(beta[5]))
+hist(fit_bayes_info$beta[,6],main="Cholesterol", xlab=expression(beta[6]))
+hist(fit_bayes_info$beta[,7],main="Max Heart Rate", xlab=expression(beta[7]))
+
+
+#apply(fit_bayes_info$beta,2,quantile,c(.05,.5,.95))
+
+col_names <- c(TeX("$\\beta_{0}$"), TeX("$\\beta_{1}$"), TeX("$\\beta_{2}$"),
+               TeX("$\\beta_{3}$"),TeX("$\\beta_{4}$"), TeX("$\\beta_{5}$"),
+               TeX("$\\beta_{6}$"))
+
+
+
+
+conf.int <-kable(apply(fit_bayes_info$beta,2,quantile,c(.025,.25,.5,.75,.975)),
+                 col.names = col_names)
+
+print(conf.int)
+```
+
+
+\vspace{0.3cm}
+
+
+Also in this case the graphs below represent the probability of CAD for males and females based on age. The same trend as before is noticed here as well. We can see some difference between the non-informative prior and the informative prior case. The relation of age and the probability of having CAD seems more "linear" now. 
+
+\vspace{0.3cm}
+
+```{r,message=FALSE, warning= FALSE, echo=FALSE}
+
+
+a=seq(min(train_data$age),max(train_data$age))
+Xm=cbind(1,a,1, mode_cp, mean_trestbps, mean_chol,mean_thalch)
+p.m=bprobit.probs(Xm,fit_bayes_info$beta)
+Xf=cbind(1,a,0,mode_cp, mean_trestbps, mean_chol,mean_thalch)
+p.f=bprobit.probs(Xf,fit_bayes_info$beta)
+
+par(mfrow=c(1,2))
+plot(a,apply(p.m,2,quantile,.5),type="l",ylim=c(0,1),
+     xlab="Age",ylab="Probability of CAD (males)")
+lines(a,apply(p.m,2,quantile,.05),lty=2)
+lines(a,apply(p.m,2,quantile,.95),lty=2)
+plot(a,apply(p.f,2,quantile,.5),type="l",ylim=c(0,1),
+     xlab="Age",ylab="Probability of CAD (females)")
+lines(a,apply(p.f,2,quantile,.05),lty=2)
+lines(a,apply(p.f,2,quantile,.95),lty=2)
+
+```
+
+\vspace{0.3cm}
+
+
+As previously we plot the probability of CAD for a male and a female versus their maximum heart rate achieved. The graphs now are even more similar to each other. They are shifted a little lower, indicating maybe a smaller probability for males and females to have CAD for a given maximum heart rate.  
+
+\vspace{0.3cm}
+
+```{r,message=FALSE, warning= FALSE, echo=FALSE}
+
+b=seq(min(train_data$thalch),max(train_data$thalch))
+
+mean_age <- mean(train_data$age)
+
+Xm=cbind(1,mean_age,1, mode_cp, mean_trestbps, mean_chol,b)
+p.m=bprobit.probs(Xm,fit_bayes_info$beta)
+Xf=cbind(1,mean_age,0,mode_cp, mean_trestbps, mean_chol,b)
+p.f=bprobit.probs(Xf,fit_bayes_info$beta)
+
+par(mfrow=c(1,2))
+plot(b,apply(p.m,2,quantile,.5),type="l",ylim=c(0,1),
+     xlab="Max Heart Rate",ylab="Probability of CAD (males)")
+lines(b,apply(p.m,2,quantile,.05),lty=2)
+lines(b,apply(p.m,2,quantile,.95),lty=2)
+plot(b,apply(p.f,2,quantile,.5),type="l",ylim=c(0,1),
+     xlab="Max Heart Rate",ylab="Probability of CAD (females)")
+lines(b,apply(p.f,2,quantile,.05),lty=2)
+lines(b,apply(p.f,2,quantile,.95),lty=2)
+
+
+```
+
+\vspace{1cm}
+
+## 5.3 Bayes Factors 
+
+Now considering only the informative prior Bayesian logistic regression model, we are going to compute the Bayes factors for our model variables, to determine once more their importance in the model. 
+
+We can determine the Bayes factors by taking the ratio of the marginal densities of the two models: [@bda3]
+
+\[
+\text{Bayes Factor } = \frac{m(y| \text{full model})}{m(y|\text{reduced model})}
+\]
+
+In \texttt{R} we compute the $\log(m(y))$ for each model and then take the ratio of their respective $\exp[\log(m(y))]$. 
+
+
+The Bayes factor when we exclude the \texttt{age} variable from the model is 
+
+\[
+\text{Bayes Factor}_{age} = \frac{\exp[\log{(m(y|\text{full model}))}]}{\exp[\log(m(y|\text{reduced model}))]} = 1947.138 .
+\]
+
+This factor is much bigger than $1$, a clear indicator of the nce of the variable \texttt{age} in our model. Similarly we compute the Bayes factors for the other variables. 
+
+\vspace{0.5cm}
+
+```{r,message=FALSE, warning= FALSE, echo=FALSE}
+
+set.seed(1234)
+
+train_data <- read.csv("heart_disease_train.csv")
+
+# Extract response variable y from the last column
+y <- train_data[, ncol(train_data)]
+
+# Extract predictor variables X from all columns except the last
+X <- train_data[, -ncol(train_data)]
+
+X <- as.matrix(X)
+
+# Add intercept term to predictor variables
+X <- cbind(1, X)
+
+beta0 <- c(0,0,0,0,0,0,0)
+c0 <- 10
+P0 <- t(X)%*%X/c0
+
+#prior=list(beta=beta0,P=P0)
+m=10000
+
+#full model including all the 6 variables
+fm <- bayes.probit(y,X,m, list(beta=beta0,P=P0))$log.marg
+fm
+
+#reduced model, excluding age
+
+### reduced model excluding 'age'
+fm_a <- bayes.probit(y,X[,-2],m,
+                  list(beta=beta0[-2],P=P0[-2,-2]))$log.marg
+fm_a
+
+
+#bayes factor for age
+
+bf_a=exp(-fm_a)/exp(-fm)   
+bf_a
+
+```
+\vspace{0.5cm}
+
+The Bayes factor when we exclude the \texttt{sex} variable from the model is 
+
+
+\[
+\text{Bayes Factor}_{\text{sex}} = \frac{\exp[\log{(m(y|\text{full model}))}]}{\exp[\log(m(y|\text{reduced model}))]} = 10722437.
+\]
+
+
+Since the Bayes factor is greater than $1$, the \texttt{sex} variable is significant in our model. 
+
+
+The Bayes factor when we exclude the \texttt{chest pain type} variable from the model is 
+
+\[
+\text{Bayes Factor}_{\text{chest pain}} = \frac{\exp[\log{(m(y|\text{full model}))}]}{\exp[\log(m(y|\text{reduced model}))]} = 215543568 > 1.
+\]
+
+This factor is much bigger than $1$, which again indicates the significance of the variable \texttt{chest pain type} in our model. This was expected, when we refer back to the original paper, International Application of a New Probability Algorithm for the Diagnosis of Coronary Artery Disease [@heart]. According to the authors any study that doesn't include the \texttt{chest pain type} variable can't have reliable results. To them this was the most important variable. 
+
+
+\vspace{0.5cm}
+```{r,message=FALSE, warning= FALSE, echo=FALSE}
+set.seed(1234)
+
+# Extract response variable y from the last column
+y <- train_data[, ncol(train_data)]
+
+# Extract predictor variables X from all columns except the last
+X <- train_data[, -ncol(train_data)]
+
+X <- as.matrix(X)
+
+# Add intercept term to predictor variables
+X <- cbind(1, X)
+
+beta0 <- c(0,0,0,0,0,0,0)
+c0 <- 10
+P0 <- t(X)%*%X/c0
+
+#prior=list(beta=beta0,P=P0)
+m=10000
+
+#full model including all the 6 variables
+fm <- bayes.probit(y,X,m, list(beta=beta0,P=P0))$log.marg
+fm
+
+### reduced model excluding 'sex'
+fm_sex=bayes.probit(y,X[,-3],m,
+                  list(beta=beta0[-3],P=P0[-3,-3]))$log.marg
+fm_sex
+
+
+#bayes factor for chest pain type
+
+bf_sex=exp(-fm_sex)/exp(-fm)   
+bf_sex
+
+### reduced model excluding 'chest pain type'
+fm_cp=bayes.probit(y,X[,-4],m,
+                  list(beta=beta0[-4],P=P0[-4,-4]))$log.marg
+fm_cp
+
+
+#bayes factor for chest pain type
+
+bf_cp=exp(-fm_cp)/exp(-fm)   
+bf_cp
+
+```
+\vspace{0.5cm}
+
+
+Lastly, we compute the Bayes factors for the other three variable \texttt{resting blood pressure, cholesterol, max heart rate achieved}. The results below confirm to us that \texttt{resting blood pressure, cholesterol} are not significant in our model and that \texttt{maximum heart rate achieved} is important. The Bayes factors for these three variables are:  
+
+\begin{align*}
+\text{Bayes Factor}_{\text{trestbps}} & = 0.7140534 < 1 \\
+\\
+\text{Bayes Factor}_{\text{chol}} & = 0.3754185 < 1 \\
+\\
+\text{Bayes Factor}_{\text{thalch}} & =  632428.5 > 1
+\end{align*}
+
+
+
+\vspace{0.5cm}
+```{r,message=FALSE, warning= FALSE, echo=FALSE}
+set.seed(1234)
+
+# Extract response variable y from the last column
+y <- train_data[, ncol(train_data)]
+
+# Extract predictor variables X from all columns except the last
+X <- train_data[, -ncol(train_data)]
+
+X <- as.matrix(X)
+
+# Add intercept term to predictor variables
+X <- cbind(1, X)
+
+beta0 <- c(0,0,0,0,0,0,0)
+c0 <- 10
+P0 <- t(X)%*%X/c0
+
+#prior=list(beta=beta0,P=P0)
+m=10000
+
+#full model including all the 6 variables
+fm <- bayes.probit(y,X,m, list(beta=beta0,P=P0))$log.marg
+fm
+
+### reduced model excluding 'resting blood pressure'
+fm_trestbps=bayes.probit(y,X[,-5],m,
+                  list(beta=beta0[-5],P=P0[-5,-5]))$log.marg
+fm_trestbps
+
+
+#bayes factor for resting blood pressure
+
+bf_trestbps=exp(-fm_trestbps)/exp(-fm)   
+bf_trestbps
+
+### reduced model excluding 'cholesterol'
+fm_chol=bayes.probit(y,X[,-6],m,
+                  list(beta=beta0[-6],P=P0[-6,-6]))$log.marg
+fm_chol
+
+
+#bayes factor for cholesterol
+
+bf_chol=exp(-fm_chol)/exp(-fm)   
+bf_chol
+
+
+### reduced model excluding 'max heart rate'
+fm_thalch=bayes.probit(y,X[,-7],m,
+                  list(beta=beta0[-7],P=P0[-7,-7]))$log.marg
+fm_thalch
+
+
+#bayes factor for max heart rate
+
+bf_thalch=exp(-fm_thalch)/exp(-fm)   
+bf_thalch
+
+
+```
+
+
+
+\vspace{1cm}
+
+
+##  5.4 Predicting the Presence of CAD through Logistic Regression
+
+Now we want to use our model to predict whether a patient has CAD or not given a set of attributes. In order to make predictions we are going to use our testing dataset. Our model is  $78.8\%$ accurate in predicting the correct outcome for a patient who has coronary heart disease.
+
+
+\vspace{0.5cm}
+
+```{r, message=FALSE, warning= FALSE, echo=FALSE}
+
+test_data <- read.csv("heart_disease_test.csv")
+
+predictors <- as.matrix(test_data[, c("age", "sex", "cp", "trestbps", "chol", 
+                                      "thalch")])
+
+
+# Extract the coefficients from posterior samples
+beta_samples <- fit_bayes_info$beta[,-1]
+
+# Compute predicted probabilities for each posterior sample
+predicted_probabilities <- matrix(0, nrow = nrow(predictors), 
+                                  ncol = nrow(beta_samples))
+for (i in 1:nrow(beta_samples)) {
+  predicted_probabilities[, i] <- pnorm(predictors %*% as.matrix(beta_samples[i, ]))
+}
+
+# Average predicted probabilities across posterior samples
+average_predicted_probabilities <- apply(predicted_probabilities, 1, mean)
+
+predicted_outcomes <- ifelse(average_predicted_probabilities >= 0.5, 1, 0)
+
+# Create a data frame with predicted probabilities
+predicted_df <- data.frame(
+  age = test_data$age,
+  sex = test_data$sex,
+  cp = test_data$cp,
+  trestbps = test_data$trestbps,
+  chol = test_data$chol,
+  thalch = test_data$thalch,
+  predicted_probability = average_predicted_probabilities
+)
+
+# Create a data frame with predicted outcomes
+outcomes_df <- data.frame(
+  age = test_data$age,
+  sex = test_data$sex,
+  cp = test_data$cp,
+  trestbps = test_data$trestbps,
+  chol = test_data$chol,
+  thalch = test_data$thalch,
+  predicted_outcome = predicted_outcomes
+)
+
+# Print the first 5 rows of each data frame
+head(predicted_df, n = 5)
+head(outcomes_df, n = 5)
+
+# Extract actual outcomes from the testing dataset
+actual_outcomes <- test_data$y  
+
+# Calculate accuracy
+accuracy <- mean(predicted_outcomes == actual_outcomes)
+
+print("Model Accuracy")
+print(accuracy)
+
+
+```
+
+\vspace{1cm}
+
+# 6. MCMC Simulations for Parameters' Posterior Distributions
+
+
+In this section we employ Markov Chain Monte Carlo for logistic regression. Using the \texttt{library(MCMCpack)} and the \texttt{MCMClogit} function, we sample from the posterior distribution of the Logistic Regression using a random walk Metropolis Algorithm. We perform a pilot run to determine the number of iterations, burnins, and thinning. We will run $62900$ iterations of the Metropolis Algorithm, using a $\texttt{burnin} = 56$, and $\texttt{thin} = 17$. 
+
+Below we have the MCMC chain for each parameter as well as their posterior distribution. 
+
+We perform the Heidelberg-Welch convergence test and all the parameters pass the test. The chain values are sampled from a stationary distribution. 
+
+
+\vspace{0.5cm}
+```{r, message=FALSE, warning= FALSE, echo=FALSE}
+set.seed(1234)
+
+train_data <- read.csv("heart_disease_train.csv")
+
+# Extract response variable y from the last column
+y <- train_data[, ncol(train_data)]
+
+# Extract predictor variables X from all columns except the last
+X <- train_data[, -ncol(train_data)]
+
+X <- as.matrix(X)
+
+# Add intercept term to predictor variables
+X <- cbind(1, X)
+
+
+beta0 <- c(0,0,0,0,0,0,0)
+c0 <- 10
+B0 <- t(X)%*%X/c0
+
+
+# Run MCMC sampling
+fit <- MCMClogit(y ~ X - 1, data = train_data, burnin=1000, 
+                 mcmc = 10000,thin = 1, beta.start = 0, b0 = beta0, B0 = B0)
+
+
+
+mcmc_samples <- as.mcmc(fit)
+
+rl_diag <- raftery.diag(mcmc_samples)
+
+rl_diag
+
+```
+
+\vspace{1cm}
+
+
+
+
+```{r, message=FALSE, warning= FALSE, echo=FALSE}
+
+# Run MCMC sampling
+fit <- MCMClogit(y ~ X - 1, data = train_data, burnin=56, 
+                 mcmc = 62900,thin = 17, beta.start = 0, b0 = beta0, B0 = B0)
+
+
+
+# Summarize the MCMC results
+summary(fit)
+
+par(mar = c(2, 2, 2, 2))
+
+# Plot posterior distributions and diagnostics
+plot(fit, col = "blue")
+
+heidel.diag(fit)
+
+```
+
+
+
+
+
+
+# 7. Conclusions
+
+
+We started this project by first taking care of the missing values in our dataset. Three of our variables of interest had missing values. We replaces the missing values with the average conditioned on age and sex. In order to use Logistic Regression in our data, we checked that the assumption of no multicollinearity was not violated by computing the $VIF$ for our variables. 
+
+Two different approaches were taken for the logistic regression, the frequentist approach and the Bayesian approach. For the Bayesian approach we considered two cases, non-informative prior and informative prior distribution for the parameters. The three models gave results that agree with each other. The most significant predictors in explaining the relationship with the response variable, CAD, were \texttt{age, sex, chest pain type, max heart rate achieved}. This was also backed up by computing the Bayes factors for all the variables. Significant variables had Bayes factors greater than 1, and the two non-significant variables had Bayes factors less than 1. 
+
+We also performed MCMC sampling from the posterior distribution of the logistic regression model, using Metropolis Algorithm and derived posterior distributions for the model parameters.  
+
+
+
+
+
+
+
+
+
+\newpage
+
+
+# References
+
+
+<div id="refs"></div>
+
+
+\newpage
+
+
+# Apendix
+
+```{r ref.label=knitr::all_labels(), echo = T, eval = F}
+```
